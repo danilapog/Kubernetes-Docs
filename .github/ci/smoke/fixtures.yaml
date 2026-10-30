@@ -1,0 +1,34 @@
+# Tiny in-cluster file server: the converter downloads test files from here.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: smoke-files, namespace: deps }
+data:
+  sample.txt: |
+    ONLYOFFICE Docs smoke test.
+    If you can read this in a PDF, the converter works.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: smoke-files, namespace: deps }
+spec:
+  selector: { matchLabels: { app: smoke-files } }
+  template:
+    metadata: { labels: { app: smoke-files } }
+    spec:
+      containers:
+        - name: http
+          image: python:3.12-alpine
+          command: [python, -m, http.server, "8080", -d, /files]
+          ports: [{ containerPort: 8080 }]
+          readinessProbe: { tcpSocket: { port: 8080 }, periodSeconds: 2 }
+          volumeMounts: [{ name: files, mountPath: /files }]
+      volumes:
+        - name: files
+          configMap: { name: smoke-files }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: smoke-files, namespace: deps }
+spec:
+  selector: { app: smoke-files }
+  ports: [{ port: 8080, targetPort: 8080 }]
