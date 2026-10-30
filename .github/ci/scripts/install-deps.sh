@@ -32,8 +32,10 @@ diagnose() {
   echo "::error::Not ready in namespace ${ns}, diagnostics follow"
   echo "--- pods";        kubectl get pods -n "$ns" -o wide || true
   echo "--- workloads";   kubectl get deploy,rs,sts -n "$ns" -o wide || true
+  echo "--- pvc";         kubectl get pvc -n "$ns" -o wide || true
   echo "--- events";      kubectl get events -n "$ns" --sort-by=.lastTimestamp | tail -40 || true
   echo "--- replicasets"; kubectl describe rs -n "$ns" | sed -n '/^Events:/,/^$/p' | tail -30 || true
+  echo "--- statefulsets"; kubectl describe sts -n "$ns" | sed -n '/^Events:/,/^$/p' | tail -30 || true
   for pod in $(kubectl get pods -n "$ns" -o name 2>/dev/null); do
     echo "--- describe ${pod}"; kubectl describe -n "$ns" "$pod" | sed -n '/^Containers:/,$p' | tail -60 || true
     echo "--- logs ${pod}";     kubectl logs -n "$ns" "$pod" --all-containers --tail=80 || true
@@ -116,10 +118,12 @@ kubectl apply -f "$CI_DIR/smoke/fixtures.yaml"
 end
 
 log "Wait for dependencies"
-kubectl wait cluster.postgresql.cnpg.io/postgres -n "$DEPS_NS" --for=condition=Ready --timeout=10m
-kubectl wait rabbitmqcluster/rabbitmq -n "$DEPS_NS" --for=condition=AllReplicasReady --timeout=10m
+kubectl wait cluster.postgresql.cnpg.io/postgres -n "$DEPS_NS" --for=condition=Ready --timeout=10m \
+  || { diagnose "$DEPS_NS"; exit 1; }
+kubectl wait rabbitmqcluster/rabbitmq -n "$DEPS_NS" --for=condition=AllReplicasReady --timeout=10m \
+  || { kubectl describe rabbitmqcluster/rabbitmq -n "$DEPS_NS" | sed -n '/^Status:/,$p'; diagnose "$DEPS_NS"; exit 1; }
 # postgres-1, pooler, rabbitmq-server-0, valkey, smoke-files
-wait_pods "$DEPS_NS" 5
+wait_pods "$DEPS_NS" 5 || { diagnose "$DEPS_NS"; exit 1; }
 end
 
 log "Copy dependency secrets to ${DOCS_NS}"
@@ -129,4 +133,3 @@ for s in postgres-app rabbitmq-default-user docs-valkey-cluster; do
     | kubectl apply -f -
 done
 end
-
