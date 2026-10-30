@@ -66,9 +66,15 @@ wait_pods() {
 }
 
 if [[ "$PLATFORM" == "openshift" ]]; then
-  log "OpenShift: allow anyuid for dependency namespaces (not for Docs)"
+  # Dependency charts pin UIDs (CNPG: 10001, postgres: 26) that restricted-v2 rejects.
+  #   anyuid     - any UID, but forbids seccomp profiles
+  #   nonroot-v2 - any non-root UID with seccomp runtime/default (what CNPG pods set)
+  # Both are granted; admission picks the one that fits each pod. Docs namespace is not touched.
+  log "OpenShift: allow anyuid and nonroot-v2 for dependency namespaces (not for Docs)"
   for ns in cert-manager cnpg-system rabbitmq-system valkey-operator-system "$DEPS_NS"; do
-    bash "$CI_DIR/scripts/scc-grant.sh" anyuid group "system:serviceaccounts:${ns}"
+    for scc in anyuid nonroot-v2; do
+      bash "$CI_DIR/scripts/scc-grant.sh" "$scc" group "system:serviceaccounts:${ns}"
+    done
   done
   end
 fi
