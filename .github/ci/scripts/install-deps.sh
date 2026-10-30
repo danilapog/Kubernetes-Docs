@@ -24,6 +24,31 @@ VALKEY_CHART_VERSION="${VALKEY_CHART_VERSION:-0.6.0}"
 log() { echo "::group::$*"; }
 end() { echo "::endgroup::"; }
 
+# Explains why workloads in a namespace are not ready. Note: when the SCC (OpenShift) or
+# admission rejects pods, no pod exists at all and the reason is only in ReplicaSet events.
+diagnose() {
+  local ns="$1"
+  echo "::endgroup::"   # keep diagnostics expanded in the job log
+  echo "::error::Not ready in namespace ${ns}, diagnostics follow"
+  echo "--- pods";        kubectl get pods -n "$ns" -o wide || true
+  echo "--- workloads";   kubectl get deploy,rs,sts -n "$ns" -o wide || true
+  echo "--- events";      kubectl get events -n "$ns" --sort-by=.lastTimestamp | tail -40 || true
+  echo "--- replicasets"; kubectl describe rs -n "$ns" | sed -n '/^Events:/,/^$/p' | tail -30 || true
+  for pod in $(kubectl get pods -n "$ns" -o name 2>/dev/null); do
+    echo "--- describe ${pod}"; kubectl describe -n "$ns" "$pod" | sed -n '/^Containers:/,$p' | tail -60 || true
+    echo "--- logs ${pod}";     kubectl logs -n "$ns" "$pod" --all-containers --tail=80 || true
+    echo "--- previous logs ${pod}"; kubectl logs -n "$ns" "$pod" --all-containers --previous --tail=80 2>/dev/null || true
+  done
+}
+
+# helm upgrade --install with diagnostics on failure; usage: helm_install <namespace> <helm args...>
+helm_install() {
+  local ns="$1"; shift
+  if ! helm upgrade --install "$@" --namespace "$ns" --create-namespace --wait --timeout "${HELM_TIMEOUT:-10m}"; then
+    diagnose "$ns"; return 1
+  fi
+}
+
 # Waits until at least <min> pods exist in <ns> and all of them are Ready
 wait_pods() {
   local ns="$1" min="$2" timeout="${3:-600}" waited=0 count
@@ -59,24 +84,22 @@ helm repo update
 end
 
 log "cert-manager ${CERT_MANAGER_VERSION}"
-helm upgrade --install cert-manager --version "$CERT_MANAGER_VERSION" jetstack/cert-manager \
-  --namespace cert-manager --create-namespace \
-  --set crds.enabled=true --set crds.keep=false --wait --timeout 10m
+helm_install cert-manager cert-manager --version "$CERT_MANAGER_VERSION" jetstack/cert-manager \
+  --set crds.enabled=true --set crds.keep=false
 end
 
 log "RabbitMQ Cluster Operator ${RABBITMQ_OPERATOR_VERSION}"
 kubectl apply -f "https://github.com/rabbitmq/cluster-operator/releases/download/${RABBITMQ_OPERATOR_VERSION}/cluster-operator.yml"
-kubectl rollout status deployment/rabbitmq-cluster-operator -n rabbitmq-system --timeout=10m
+kubectl rollout status deployment/rabbitmq-cluster-operator -n rabbitmq-system --timeout=10m \
+  || { diagnose rabbitmq-system; exit 1; }
 end
 
 log "CloudNativePG ${CNPG_CHART_VERSION}"
-helm upgrade --install cnpg --version "$CNPG_CHART_VERSION" cnpg/cloudnative-pg \
-  --namespace cnpg-system --create-namespace --wait --timeout 10m
+helm_install cnpg-system cnpg --version "$CNPG_CHART_VERSION" cnpg/cloudnative-pg
 end
 
 log "Valkey operator ${VALKEY_CHART_VERSION}"
-helm upgrade --install valkey --version "$VALKEY_CHART_VERSION" valkey/valkey-operator \
-  --namespace valkey-operator-system --create-namespace --wait --timeout 10m
+helm_install valkey-operator-system valkey --version "$VALKEY_CHART_VERSION" valkey/valkey-operator
 end
 
 log "Dependency clusters (storage class: ${STORAGE_CLASS})"
@@ -100,3 +123,4 @@ for s in postgres-app rabbitmq-default-user docs-valkey-cluster; do
     | kubectl apply -f -
 done
 end
+
