@@ -24,24 +24,8 @@ VALKEY_CHART_VERSION="${VALKEY_CHART_VERSION:-0.6.0}"
 log() { echo "::group::$*"; }
 end() { echo "::endgroup::"; }
 
-# Explains why workloads in a namespace are not ready. Note: when the SCC (OpenShift) or
-# admission rejects pods, no pod exists at all and the reason is only in ReplicaSet events.
-diagnose() {
-  local ns="$1"
-  echo "::endgroup::"   # keep diagnostics expanded in the job log
-  echo "::error::Not ready in namespace ${ns}, diagnostics follow"
-  echo "--- pods";        kubectl get pods -n "$ns" -o wide || true
-  echo "--- workloads";   kubectl get deploy,rs,sts -n "$ns" -o wide || true
-  echo "--- pvc";         kubectl get pvc -n "$ns" -o wide || true
-  echo "--- events";      kubectl get events -n "$ns" --sort-by=.lastTimestamp | tail -40 || true
-  echo "--- replicasets"; kubectl describe rs -n "$ns" | sed -n '/^Events:/,/^$/p' | tail -30 || true
-  echo "--- statefulsets"; kubectl describe sts -n "$ns" | sed -n '/^Events:/,/^$/p' | tail -30 || true
-  for pod in $(kubectl get pods -n "$ns" -o name 2>/dev/null); do
-    echo "--- describe ${pod}"; kubectl describe -n "$ns" "$pod" | sed -n '/^Containers:/,$p' | tail -60 || true
-    echo "--- logs ${pod}";     kubectl logs -n "$ns" "$pod" --all-containers --tail=80 || true
-    echo "--- previous logs ${pod}"; kubectl logs -n "$ns" "$pod" --all-containers --previous --tail=80 2>/dev/null || true
-  done
-}
+# shellcheck source=diagnose.sh
+source "$CI_DIR/scripts/diagnose.sh"
 
 # helm upgrade --install with diagnostics on failure; usage: helm_install <namespace> <helm args...>
 helm_install() {
