@@ -45,7 +45,7 @@ helm test "$RELEASE" -n "$NS" --logs --timeout 10m || { diagnose "$NS"; exit 1; 
 echo "::endgroup::"
 
 echo "::group::Smoke tests"
-export FIXTURE_URL="http://smoke-files.deps.svc.cluster.local:8080/sample.txt"
+export FILES_URL="http://smoke-files.deps.svc.cluster.local:8080"
 if [[ "$PLATFORM" == "openshift" ]]; then
   kubectl get route -n "$NS" -o wide
   export DS_URL="http://${ROUTE_HOST:?}"
