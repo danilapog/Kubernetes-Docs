@@ -98,6 +98,9 @@ log "Dependency clusters (storage class: ${STORAGE_CLASS})"
 for f in postgresql rabbitmq valkey; do
   envsubst '${STORAGE_CLASS}' < "$CI_DIR/deps/${f}.yaml" | kubectl apply -n "$DEPS_NS" -f -
 done
+# Test files for smoke tests (binary files are fine: kubectl puts them into binaryData)
+kubectl create configmap smoke-files -n "$DEPS_NS" --from-file="$CI_DIR/smoke/files" \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f "$CI_DIR/smoke/fixtures.yaml"
 end
 
