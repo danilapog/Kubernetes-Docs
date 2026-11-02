@@ -13,6 +13,8 @@ CI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASE="${RELEASE:-documentserver}"
 NS="${DOCS_NAMESPACE:-docs}"
 read -r -a helm_args <<< "${HELM_ARGS}"
+# shellcheck source=diagnose.sh
+source "$CI_DIR/scripts/diagnose.sh"
 
 echo "::group::Images"
 charts=(.)
@@ -27,17 +29,19 @@ echo "::endgroup::"
 
 if [[ -n "${BASE_CHART:-}" ]]; then
   echo "::group::Install base chart"
-  helm install "$RELEASE" "$BASE_CHART" -n "$NS" "${helm_args[@]}" --wait --timeout 15m
+  helm install "$RELEASE" "$BASE_CHART" -n "$NS" "${helm_args[@]}" --wait --timeout 15m \
+    || { diagnose "$NS"; exit 1; }
   echo "::endgroup::"
 fi
 
 echo "::group::Install / upgrade chart"
-helm upgrade --install "$RELEASE" . -n "$NS" "${helm_args[@]}" --wait --timeout 15m
+helm upgrade --install "$RELEASE" . -n "$NS" "${helm_args[@]}" --wait --timeout 15m \
+  || { diagnose "$NS"; exit 1; }
 kubectl get pods,pvc -n "$NS" -o wide
 echo "::endgroup::"
 
 echo "::group::helm test"
-helm test "$RELEASE" -n "$NS" --logs --timeout 10m
+helm test "$RELEASE" -n "$NS" --logs --timeout 10m || { diagnose "$NS"; exit 1; }
 echo "::endgroup::"
 
 echo "::group::Smoke tests"
