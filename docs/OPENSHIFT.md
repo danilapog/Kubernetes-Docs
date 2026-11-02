@@ -66,27 +66,26 @@ oc apply -f common.yaml
 > After assigning any SCC, set `serviceAccount.create` to `true`.
 
 ## Set the SCC annotation in the chart
-To apply the required SCC to all resources:
+OpenShift reads the `openshift.io/required-scc` annotation only from the Pod itself. Set it in the pod annotations of every component, otherwise the pods may be admitted with a different SCC (for example, `restricted-v2` with a random UID):
 ```bash
---set commonAnnotations."openshift\.io/required-scc"="anyuid"
+--set docservice.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set converter.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set adminpanel.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set example.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set install.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set upgrade.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set rollback.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set delete.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set clearCache.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set grafanaDashboard.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set wopiKeysGeneration.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set wopiKeysDeletion.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set customResources.job.podAnnotations."openshift\.io/required-scc"="anyuid" \
+--set tests.annotations."openshift\.io/required-scc"="anyuid"
 ```
 
-Or set it per resource:
-```bash
---set docservice.annotations."openshift\.io/required-scc"="anyuid" \
---set converter.annotations."openshift\.io/required-scc"="anyuid" \
---set adminpanel.annotations."openshift\.io/required-scc"="anyuid" \
---set example.annotations."openshift\.io/required-scc"="anyuid" \
---set upgrade.job.annotations."openshift\.io/required-scc"="anyuid" \
---set rollback.job.annotations."openshift\.io/required-scc"="anyuid" \
---set delete.job.annotations."openshift\.io/required-scc"="anyuid" \
---set install.job.annotations."openshift\.io/required-scc"="anyuid" \
---set clearCache.job.annotations."openshift\.io/required-scc"="anyuid" \
---set grafanaDashboard.job.annotations."openshift\.io/required-scc"="anyuid" \
---set wopiKeysGeneration.job.annotations."openshift\.io/required-scc"="anyuid" \
---set wopiKeysDeletion.job.annotations."openshift\.io/required-scc"="anyuid" \
---set tests.annotations."openshift\.io/required-scc"="anyuid" \
-```
+> [!NOTE]
+> `commonAnnotations` and `*.annotations` are added to Deployments, StatefulSets and Jobs, not to their pods, so they do not select the SCC. `tests.annotations` is the exception: the test is a standalone Pod.
 
 ## Enable security contexts
 If you assigned an SCC that requires security contexts, enable them in the chart.
@@ -173,18 +172,19 @@ helm install documentserver onlyoffice/docs \
   --set openshift.route.enabled=true \
   --set openshift.route.host=<HOSTNAME> \
   --set openshift.route.path=<PATH> \
-  --set docservice.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set converter.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set adminpanel.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set example.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set upgrade.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set rollback.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set delete.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set install.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set clearCache.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set grafanaDashboard.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set wopiKeysGeneration.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
-  --set wopiKeysDeletion.job.annotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set docservice.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set converter.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set adminpanel.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set example.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set install.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set upgrade.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set rollback.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set delete.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set clearCache.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set grafanaDashboard.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set wopiKeysGeneration.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set wopiKeysDeletion.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
+  --set customResources.job.podAnnotations."openshift\.io/required-scc"="nonroot-v2" \
   --set tests.annotations."openshift\.io/required-scc"="nonroot-v2" \
   --set podSecurityContext.enabled=true \
   --set docservice.containerSecurityContext.enabled=true \
