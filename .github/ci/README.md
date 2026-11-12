@@ -39,19 +39,34 @@ Test files for conversion are served from `smoke/fixtures.yaml`.
 ## Chaos scenarios
 
 `chaos/chaos.sh`, runs after `deploy-test.sh` in the `k8s (chaos)` job. Each scenario injects a fault,
-removes it and requires Docs to recover **by itself** within `RECOVERY_TIMEOUT` (all pods in `deps` and `docs`
-Ready, `/healthcheck` = `true`), then runs a quick smoke subset. A `/healthcheck` probe runs every second
-during the scenario; the job summary shows failed probes, the longest outage and Docs container restarts.
+removes it and requires Docs to recover **by itself** within `RECOVERY_TIMEOUT`, then runs a quick smoke subset.
+Recovery is measured in two steps: first the infrastructure (all pods in `deps` and the NFS server Ready,
+with at least as many pods as before the scenario), then Docs (pods in `docs` Ready, `/healthcheck` = `true`).
 
 | group | scenarios | tool |
 |---|---|---|
 | Docs pods | `docservice-kill`, `converter-kill`, `convert-converter-down` (conversion requested while no converter runs) | kubectl |
 | dependencies | `postgres-kill`, `pgbouncer-kill`, `rabbitmq-kill`, `valkey-kill`, `nfs-server-kill` | kubectl |
-| network / resources | `net-partition-postgres`, `net-partition-rabbitmq`, `net-delay-deps` (smoke during the fault), `cpu-stress-converter` | Chaos Mesh (`chaos/mesh/*.yaml`) |
+| network / resources | `net-partition-postgres`, `net-partition-rabbitmq`, `net-delay-deps` (smoke during the fault), `cpu-stress-converter` (smoke during the fault) | Chaos Mesh (`chaos/mesh/*.yaml`) |
 | node | `node-restart` (`docker restart` of the kind node) | docker |
 
+Chaos Mesh experiments must reach `AllInjected` and select at least one container, otherwise the scenario fails
+(a fault that was never injected would pass silently). Removal waits for Chaos Mesh's finalizer, i.e. full recovery.
+
+Job summary columns:
+
+| column | meaning |
+|---|---|
+| outage | longest continuous period with `/healthcheck` != `true`, by timestamps |
+| infra | fault removed → `deps` + NFS pods Ready again (time the dependency itself needs) |
+| Docs lag | infra Ready → Docs Ready and healthy (Docs' own reconnect / recovery time) |
+| smoke | duration of the smoke subset after recovery: catches hangs `/healthcheck` does not see (storage) |
+| Docs restarts | container restarts in `docs` during the scenario; expected only for `node-restart` |
+
 Docs is reached through a NodePort (`chaos/nodeport.yaml`): `kubectl port-forward` dies with the pod it is bound to.
-Env: `CHAOS_ONLY` / `CHAOS_SKIP` (regex), `CHAOS_MESH=1`, `FAULT_DURATION`, `RECOVERY_TIMEOUT`, `MAX_DOWNTIME`.
+
+Env: `CHAOS_ONLY` / `CHAOS_SKIP` (regex), `CHAOS_MESH=1`, `FAULT_DURATION`, `RECOVERY_TIMEOUT`,
+thresholds (report only when unset): `MAX_DOWNTIME`, `MAX_DOCS_LAG`, `MAX_SMOKE`.
 Add a scenario: a function that injects and removes the fault, plus `run <name> <function> [args]`.
 
 ## Secrets (optional)

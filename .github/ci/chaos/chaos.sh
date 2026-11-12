@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Resilience (chaos) scenarios against a release already deployed by deploy-test.sh.
 #
-# Every scenario: start an availability probe -> inject a fault -> remove it -> wait until all
-# pods in "deps" and the Docs namespace are Ready and /healthcheck is "true" -> quick smoke subset.
+# Every scenario: start an availability probe -> inject a fault -> remove it -> wait until the
+# infrastructure (pods in "deps" and the NFS server) is back, then until Docs is Ready and
+# /healthcheck is "true" -> quick smoke subset.
 # A scenario fails if Docs does not recover ON ITS OWN within RECOVERY_TIMEOUT (no restarts by CI),
-# or a smoke check fails after recovery (or during the fault, for "degraded but working" scenarios).
+# a smoke check fails after recovery (or during the fault, for "degraded but working" scenarios),
+# or a MAX_* threshold below is exceeded.
+#
+# Report columns:
+#   outage      longest continuous period with /healthcheck != true (whole scenario)
+#   infra       seconds from fault removal until deps + NFS pods are all Ready again
+#   Docs lag    seconds from that moment until Docs is Ready and healthy: Docs' own recovery time
+#   smoke       duration of the smoke subset after recovery (catches hangs /healthcheck does not see)
 #
 # env: PLATFORM            kind | openshift   (node restart and Chaos Mesh scenarios are kind only)
 #      DOCS_NAMESPACE      (default docs)
@@ -15,16 +23,21 @@
 #      CHAOS_MESH_VERSION  Chaos Mesh chart version
 #      FAULT_DURATION      seconds a network fault is held (default 60)
 #      RECOVERY_TIMEOUT    seconds to recover after the fault is removed (default 300)
-#      MAX_DOWNTIME        seconds; if set, fail when the longest outage is longer (default: report only)
+#      MAX_DOWNTIME        seconds; fail when the longest outage is longer   (default: report only)
+#      MAX_DOCS_LAG        seconds; fail when Docs lag is longer             (default: report only)
+#      MAX_SMOKE           seconds; fail when the smoke subset takes longer  (default: report only)
 set -euo pipefail
 
 CI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NS="${DOCS_NAMESPACE:-docs}"
 DEPS_NS=deps
+NFS_NS=default   # NFS Server Provisioner (kind); on OpenShift there is no pod there, which is fine
 PLATFORM="${PLATFORM:-kind}"
 FAULT_DURATION="${FAULT_DURATION:-60}"
 RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-300}"
 MAX_DOWNTIME="${MAX_DOWNTIME:-}"
+MAX_DOCS_LAG="${MAX_DOCS_LAG:-}"
+MAX_SMOKE="${MAX_SMOKE:-}"
 CHAOS_MESH_VERSION="${CHAOS_MESH_VERSION:-2.8.4}"
 # shellcheck source=../scripts/diagnose.sh
 source "$CI_DIR/scripts/diagnose.sh"
@@ -40,12 +53,13 @@ set_ds_url() {
     DS_URL="http://${ROUTE_HOST:?}"
   else
     # node IP is re-read: it can change after a node restart
-    DS_URL="http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30888"
+    DS_URL="http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null):30888"
   fi
   export DS_URL
 }
 
-healthy() { [[ "$(curl -s -m 3 "$DS_URL/healthcheck" 2>/dev/null)" == "true" ]]; }
+# 1s timeout: a hanging healthcheck counts as down and keeps the probe at ~1 sample per 1-2s
+healthy() { [[ "$(curl -s -m 1 "$DS_URL/healthcheck" 2>/dev/null)" == "true" ]]; }
 
 smoke() {  # smoke <regex>; no step summary per call, the chaos table is written at the end
   GITHUB_STEP_SUMMARY='' SMOKE_ONLY="$1" python3 "$CI_DIR/smoke/smoke.py"
@@ -63,34 +77,51 @@ probe_start() {
   PROBE_PID=$!
 }
 
-# Prints "<failed>/<total> <longest outage in seconds>"
+# Prints the longest continuous outage in seconds (by timestamps, not by sample count)
 probe_stop() {
   kill "$PROBE_PID" 2>/dev/null || true
   wait "$PROBE_PID" 2>/dev/null || true
-  awk '{ n++ }
-       $2 == 0 { f++; if (!start) start = $1; cur = $1 - start + 1; if (cur > max) max = cur }
+  awk '$2 == 0 { if (!start) start = $1; cur = $1 - start + 1; if (cur > max) max = cur }
        $2 == 1 { start = 0 }
-       END { printf "%d/%d %d\n", f, n, max }' "$PROBE_LOG"
+       END { print max + 0 }' "$PROBE_LOG"
 }
 
 # ---------------------------------------------------------------- recovery
 
-# All non-completed, non-terminating pods of the namespace are Ready (and there is at least one)
-all_ready() {
-  kubectl get pods -n "$1" -o json 2>/dev/null | jq -e '
+# "<ready> <total>" of non-completed, non-terminating pods in a namespace
+pod_counts() {
+  kubectl get pods -n "$1" -o json 2>/dev/null | jq -r '
     [.items[] | select(.status.phase != "Succeeded" and .metadata.deletionTimestamp == null)]
-    | length > 0 and all(.status.conditions // [] | any(.type == "Ready" and .status == "True"))' > /dev/null
+    | "\([.[] | select(.status.conditions // [] | any(.type == "Ready" and .status == "True"))] | length) \(length)"'
 }
 
+# All pods Ready and at least as many as before the scenario: a killed pod that has not been
+# recreated yet must not look like "everything is Ready"
+ns_ready() {  # ns_ready <namespace> <minimum pod count>
+  local ready total
+  read -r ready total < <(pod_counts "$1") || return 1
+  [[ -n "${total:-}" ]] && (( ready == total && total >= $2 ))
+}
+
+infra_ready() { ns_ready "$DEPS_NS" "$BASE_DEPS" && ns_ready "$NFS_NS" "$BASE_NFS"; }
+docs_ready()  { ns_ready "$NS" "$BASE_DOCS" && healthy; }
+
+# Sets INFRA_TIME and DOCS_LAG (seconds, "-" if not reached)
 wait_recovered() {
-  local deadline=$((SECONDS + RECOVERY_TIMEOUT))
+  local start=$SECONDS deadline=$((SECONDS + RECOVERY_TIMEOUT)) t_infra=""
+  INFRA_TIME="-"; DOCS_LAG="-"
   while (( SECONDS < deadline )); do
     set_ds_url
-    if all_ready "$DEPS_NS" && all_ready "$NS" && healthy; then
-      echo "recovered after $((SECONDS - (deadline - RECOVERY_TIMEOUT)))s"
+    if [[ -z "$t_infra" ]] && infra_ready; then
+      t_infra=$SECONDS; INFRA_TIME=$((t_infra - start))
+      echo "infrastructure Ready after ${INFRA_TIME}s"
+    fi
+    if [[ -n "$t_infra" ]] && docs_ready; then
+      DOCS_LAG=$((SECONDS - t_infra))
+      echo "Docs Ready and healthy ${DOCS_LAG}s after the infrastructure"
       return 0
     fi
-    sleep 3
+    sleep 1
   done
   return 1
 }
@@ -100,10 +131,16 @@ docs_restarts() {
   kubectl get pods -n "$NS" -o json | jq '[.items[].status.containerStatuses[]?.restartCount] | add // 0'
 }
 
+pod_total() { local r t; read -r r t < <(pod_counts "$1"); echo "${t:-0}"; }
+
 # ---------------------------------------------------------------- scenario runner
 
 results=()
 failed=0
+
+over() {  # over <value> <limit>: true if a limit is set and the value is a number above it
+  [[ -n "$2" && "$1" =~ ^[0-9]+$ ]] && (( $1 > $2 ))
+}
 
 run() {  # run <name> <function> [args...]
   local name="$1"; shift
@@ -111,7 +148,9 @@ run() {  # run <name> <function> [args...]
   [[ -n "${CHAOS_SKIP:-}" && "$name" =~ ${CHAOS_SKIP} ]] && return 0
 
   echo "::group::chaos: ${name}"
-  local status=PASS note="" t0=$SECONDS r0 probe outage
+  local status=PASS note="" t0=$SECONDS r0 outage smoke_time="-" ts
+  BASE_DEPS=$(pod_total "$DEPS_NS"); BASE_NFS=$(pod_total "$NFS_NS"); BASE_DOCS=$(pod_total "$NS")
+  INFRA_TIME="-"; DOCS_LAG="-"
   r0=$(docs_restarts)
   set_ds_url
   probe_start
@@ -122,17 +161,24 @@ run() {  # run <name> <function> [args...]
     status=FAIL; note="not recovered in ${RECOVERY_TIMEOUT}s"
     diagnose "$NS"; diagnose "$DEPS_NS"
   fi
-  probe=$(probe_stop)
-  outage="${probe#* }"
+  outage=$(probe_stop)
 
-  if [[ "$status" == PASS ]] && ! smoke "$SMOKE_QUICK"; then
-    status=FAIL; note="smoke failed after recovery"
+  if [[ "$status" == PASS ]]; then
+    ts=$SECONDS
+    smoke "$SMOKE_QUICK" || { status=FAIL; note="smoke failed after recovery"; }
+    smoke_time=$((SECONDS - ts))
   fi
-  if [[ "$status" == PASS && -n "$MAX_DOWNTIME" ]] && (( outage > MAX_DOWNTIME )); then
-    status=FAIL; note="outage ${outage}s > MAX_DOWNTIME ${MAX_DOWNTIME}s"
+  if [[ "$status" == PASS ]]; then
+    if over "$outage" "$MAX_DOWNTIME"; then
+      status=FAIL; note="outage ${outage}s > MAX_DOWNTIME ${MAX_DOWNTIME}s"
+    elif over "$DOCS_LAG" "$MAX_DOCS_LAG"; then
+      status=FAIL; note="Docs lag ${DOCS_LAG}s > MAX_DOCS_LAG ${MAX_DOCS_LAG}s"
+    elif over "$smoke_time" "$MAX_SMOKE"; then
+      status=FAIL; note="smoke ${smoke_time}s > MAX_SMOKE ${MAX_SMOKE}s"
+    fi
   fi
 
-  results+=("${name}|${status}|${probe% *}|${outage}s|$(( $(docs_restarts) - r0 ))|$((SECONDS - t0))s|${note}")
+  results+=("${name}|${status}|${outage}|${INFRA_TIME}|${DOCS_LAG}|${smoke_time}|$(( $(docs_restarts) - r0 ))|$((SECONDS - t0))|${note}")
   echo "::endgroup::"
   if [[ "$status" != PASS ]]; then
     echo "::error::chaos ${name}: ${note}"
@@ -152,19 +198,36 @@ kill_pods() {  # kill_pods <namespace> <name regex>
   sleep 5   # let the probe see the outage before the recovery wait starts
 }
 
-# Applies a Chaos Mesh manifest, holds it, removes it. With a smoke regex, runs it while the
-# fault is active ("degraded but working"), otherwise just waits FAULT_DURATION.
+# Applies a Chaos Mesh experiment, checks it really reached some containers, holds it, removes it.
+# With a smoke regex, runs it while the fault is active ("degraded but working"),
+# otherwise just waits FAULT_DURATION.
 # shellcheck disable=SC2016  # ${DOCS_NS} is an envsubst variable list, not a shell expansion
 mesh() {  # mesh <manifest name> [smoke regex during the fault]
-  local file="$CI_DIR/chaos/mesh/$1.yaml" rc=0
-  DOCS_NS="$NS" envsubst '${DOCS_NS}' < "$file" | kubectl apply -f - || return 1
-  sleep 5   # injection is asynchronous
-  if [[ -n "${2:-}" ]]; then
-    smoke "$2" || rc=1
+  local rendered records rc=0
+  rendered=$(mktemp --suffix .yaml)
+  DOCS_NS="$NS" envsubst '${DOCS_NS}' < "$CI_DIR/chaos/mesh/$1.yaml" > "$rendered"
+  kubectl apply -f "$rendered" || return 1
+
+  # Injection is asynchronous; without this the smoke may run before the fault exists
+  if ! kubectl wait -f "$rendered" --for=condition=AllInjected --timeout=120s; then
+    echo "::error::$1: fault was not injected"
+    kubectl describe -f "$rendered" | tail -40 || true
+    rc=1
   else
-    sleep "$FAULT_DURATION"
+    # AllInjected is also true when the selector matched nothing
+    records=$(kubectl get -f "$rendered" -o json | jq '.status.experiment.containerRecords // [] | length')
+    echo "$1: injected into ${records} container(s)"
+    if (( records == 0 )); then
+      echo "::error::$1: selector matched no pods"; rc=1
+    elif [[ -n "${2:-}" ]]; then
+      smoke "$2" || rc=1
+    else
+      sleep "$FAULT_DURATION"
+    fi
   fi
-  DOCS_NS="$NS" envsubst '${DOCS_NS}' < "$file" | kubectl delete -f - --wait=true --timeout=120s || rc=1
+
+  # Deletion waits for Chaos Mesh's finalizer, i.e. until the fault is recovered in every pod
+  kubectl delete -f "$rendered" --wait=true --timeout=120s || rc=1
   return "$rc"
 }
 
@@ -224,7 +287,7 @@ run postgres-kill             kill_pods "$DEPS_NS" '^pod/postgres-[0-9]+$'
 run pgbouncer-kill            kill_pods "$DEPS_NS" '^pod/postgres-pooler-rw-'
 run rabbitmq-kill             kill_pods "$DEPS_NS" '^pod/rabbitmq-server-'
 run valkey-kill               kill_pods "$DEPS_NS" '^pod/valkey-'
-run nfs-server-kill           kill_pods default    '^pod/nfs-server-nfs-server-provisioner-'
+run nfs-server-kill           kill_pods "$NFS_NS"  '^pod/nfs-server-nfs-server-provisioner-'
 
 # Network and resource faults
 if [[ "${CHAOS_MESH:-0}" == 1 && "$PLATFORM" == kind ]]; then
@@ -235,19 +298,24 @@ if [[ "${CHAOS_MESH:-0}" == 1 && "$PLATFORM" == kind ]]; then
   run cpu-stress-converter    mesh stress-converter-cpu '^convert_async_with_polling$'
 fi
 
-# Whole node power cycle: the heaviest one, last
+# Whole node power cycle: the heaviest one, last.
+# Docs restarts are expected here: kubelet restarts every container after a node reboot.
 [[ "$PLATFORM" == kind ]] && run node-restart node_restart
 
 # ---------------------------------------------------------------- report
 
+sec() { [[ "$1" =~ ^[0-9]+$ ]] && echo "${1}s" || echo "$1"; }
 {
   echo "### Chaos (${PLATFORM})"
-  echo "| scenario | result | failed probes | longest outage | Docs restarts | took | note |"
-  echo "|---|---|---|---|---|---|---|"
+  echo "| scenario | result | outage | infra | Docs lag | smoke | Docs restarts | took | note |"
+  echo "|---|---|---|---|---|---|---|---|---|"
   for r in "${results[@]}"; do
-    IFS='|' read -r n s p o rs t note <<< "$r"
-    echo "| \`${n}\` | $([[ $s == PASS ]] && echo ✅ || echo ❌) ${s} | ${p} | ${o} | ${rs} | ${t} | ${note} |"
+    IFS='|' read -r n s o inf lag sm rs t note <<< "$r"
+    echo "| \`${n}\` | $([[ $s == PASS ]] && echo ✅ || echo ❌) ${s} | $(sec "$o") | $(sec "$inf") | $(sec "$lag") | $(sec "$sm") | ${rs} | $(sec "$t") | ${note} |"
   done
+  echo
+  echo "outage: longest period with /healthcheck != true · infra: fault removed → deps + NFS Ready ·"
+  echo "Docs lag: infra Ready → Docs Ready and healthy · smoke: quick smoke after recovery"
 } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 (( failed == 0 ))
