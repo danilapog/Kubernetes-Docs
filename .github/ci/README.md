@@ -6,6 +6,7 @@ Workflow: `.github/workflows/chart-e2e.yaml`. Runs on every PR and manually (Act
 |---|---|---|
 | `k8s (install)` | kind | clean install, `helm test`, smoke |
 | `k8s (upgrade)` | kind | install from the base branch → upgrade to the PR chart, `helm test`, smoke |
+| `k8s (chaos)` | kind | clean install, then resilience scenarios (see below) |
 | `OpenShift (<scc>, …)` | MicroShift (OKD) | install under `docs-components` / `anyuid` / `nonroot-v2` SCC, Route, `helm test`, smoke, SCC check |
 
 Dependencies are installed as described in `README.md` and `docs/DEPENDENCIES.md`
@@ -34,6 +35,24 @@ ci-images-tag: 10.0.0-12
 
 `smoke/smoke.py`, stdlib only. Add a function with `@check`. Env: `DS_URL`, `JWT_SECRET`, `FIXTURE_URL`.
 Test files for conversion are served from `smoke/fixtures.yaml`.
+
+## Chaos scenarios
+
+`chaos/chaos.sh`, runs after `deploy-test.sh` in the `k8s (chaos)` job. Each scenario injects a fault,
+removes it and requires Docs to recover **by itself** within `RECOVERY_TIMEOUT` (all pods in `deps` and `docs`
+Ready, `/healthcheck` = `true`), then runs a quick smoke subset. A `/healthcheck` probe runs every second
+during the scenario; the job summary shows failed probes, the longest outage and Docs container restarts.
+
+| group | scenarios | tool |
+|---|---|---|
+| Docs pods | `docservice-kill`, `converter-kill`, `convert-converter-down` (conversion requested while no converter runs) | kubectl |
+| dependencies | `postgres-kill`, `pgbouncer-kill`, `rabbitmq-kill`, `valkey-kill`, `nfs-server-kill` | kubectl |
+| network / resources | `net-partition-postgres`, `net-partition-rabbitmq`, `net-delay-deps` (smoke during the fault), `cpu-stress-converter` | Chaos Mesh (`chaos/mesh/*.yaml`) |
+| node | `node-restart` (`docker restart` of the kind node) | docker |
+
+Docs is reached through a NodePort (`chaos/nodeport.yaml`): `kubectl port-forward` dies with the pod it is bound to.
+Env: `CHAOS_ONLY` / `CHAOS_SKIP` (regex), `CHAOS_MESH=1`, `FAULT_DURATION`, `RECOVERY_TIMEOUT`, `MAX_DOWNTIME`.
+Add a scenario: a function that injects and removes the fault, plus `run <name> <function> [args]`.
 
 ## Secrets (optional)
 

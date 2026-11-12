@@ -86,7 +86,8 @@ jobs:
       matrix:
         # install: clean install of the PR chart
         # upgrade: install the chart from the base branch, then upgrade to the PR chart
-        scenario: [install, upgrade]
+        # chaos:   clean install, then resilience scenarios (.github/ci/chaos/chaos.sh)
+        scenario: [install, upgrade, chaos]
     env:
       PLATFORM: kind
       DOCKERHUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
@@ -153,6 +154,12 @@ jobs:
 
       - name: Deploy and test
         run: bash "${CI_DIR}/scripts/deploy-test.sh"
+
+      - name: Chaos scenarios
+        if: matrix.scenario == 'chaos'
+        env:
+          CHAOS_MESH: "1"
+        run: bash "${CI_DIR}/chaos/chaos.sh"
 
       - name: Collect debug info
         if: failure()
