@@ -35,5 +35,10 @@ groups: []
 # plus projected/downwardAPI for the service account token. Same set as restricted-v2, minus csi/ephemeral.
 volumes:
 - configMap
+- downwardAPI
+- emptyDir
+- persistentVolumeClaim
+- projected
+- secret
 seccompProfiles:
 - runtime/default
