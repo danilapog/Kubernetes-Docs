@@ -33,12 +33,6 @@ users:
 groups: []
 # Volume types used by the chart (configMap, secret, emptyDir, persistentVolumeClaim)
 # plus projected/downwardAPI for the service account token. Same set as restricted-v2, minus csi/ephemeral.
-volumes:
-- configMap
-- downwardAPI
-- emptyDir
-- persistentVolumeClaim
-- projected
-- secret
+volumes: []
 seccompProfiles:
 - runtime/default
