@@ -14,7 +14,7 @@ name: Chart e2e (GitHub)
 on:
   pull_request:
     types: [opened, reopened, synchronize]
-    branches: [master]
+    branches: [release/v7.1.0]
     paths-ignore:
       - '**/README.md'
       - '**/CHANGELOG.md'
@@ -41,7 +41,7 @@ jobs:
       - name: Run e2e on GitHub and wait for the result
         env:
           GH_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
-          GH_REPO: ${{ vars.E2E_GITHUB_REPO || 'ONLYOFFICE/Kubernetes-Docs' }}
+          GH_REPO: ${{ vars.E2E_GITHUB_REPO || 'danilapog/Kubernetes-Docs' }}
           GITEA_TOKEN: ${{ github.token }}
           GITEA_URL: ${{ github.server_url }}
           GITEA_REPO: ${{ github.repository }}
