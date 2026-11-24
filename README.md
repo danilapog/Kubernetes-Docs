@@ -1,7 +1,7 @@
 # ONLYOFFICE Docs for Kubernetes
 
 This repository contains a set of files to deploy ONLYOFFICE Docs into a Kubernetes cluster or OpenShift cluster.
-
+## 
 ## Contents
 - [Requirements](#requirements)
 - [Introduction](#introduction)
